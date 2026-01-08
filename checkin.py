@@ -324,6 +324,7 @@ def parse_accounts(accounts_str: str) -> list:
 
 def main():
     """主函数"""
+    execution_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print('=' * 50)
     print('NewAPI 自动签到')
     print(f'执行时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
@@ -348,6 +349,7 @@ def main():
 
     success_count = 0
     fail_count = 0
+    checkin_results = []
 
     for i, account in enumerate(accounts, 1):
         url = account['url']
@@ -409,9 +411,28 @@ def main():
                 else:
                     total_str = str(total_quota)
                 print(f'  统计: 本月已签 {checkin_count} 天，累计 {total_str} 额度')
+
+            # 收集结果用于钉钉通知
+            account_result = {
+                'name': name,
+                'success': True,
+                'message': result['message'],
+                'quota_awarded': result.get('quota_awarded'),
+                'checkin_count': checkin_count
+            }
+            checkin_results.append(account_result)
         else:
             fail_count += 1
             print(f'  结果: ❌ {result["message"]}')
+
+        # 收集结果用于钉钉通知
+        account_result = {
+            'name': name,
+            'success': False,
+            'message': result['message'],
+            'session_expired': 'session' in result['message'].lower() or '认证' in result['message']
+        }
+        checkin_results.append(account_result)
 
         print()
 
@@ -419,6 +440,13 @@ def main():
     print('=' * 50)
     print(f'签到完成: 成功 {success_count}, 失败 {fail_count}')
     print('=' * 50)
+    
+    # 发送钉钉通知
+    if send_checkin_notification:
+        print('正在发送钉钉通知...')
+        send_checkin_notification(checkin_results, execution_time)
+    elif os.environ.get('DINGTALK_WEBHOOK'):
+        print('[警告] 已配置 DINGTALK_WEBHOOK 但无法导入通知模块')
 
     # 如果全部失败则返回错误码
     if fail_count == len(accounts):
@@ -427,3 +455,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+# === DINGTALK NOTIFICATION PATCH ===
+# This section was added to send DingTalk notifications
