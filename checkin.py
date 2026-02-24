@@ -3,6 +3,7 @@
 """
 NewAPI 自动签到脚本
 支持多账号签到，通过 GitHub Actions 定时执行
+支持 Telegram 和钉钉通知
 """
 
 import os
@@ -13,11 +14,127 @@ import requests
 from datetime import datetime
 from typing import Optional
 
-# 钉钉通知
+# ============ 通知模块 ============
+
+def send_telegram_notification(bot_token: str, chat_id: str, message: str) -> bool:
+    """
+    发送 Telegram 通知
+    
+    Args:
+        bot_token: Telegram Bot Token
+        chat_id: 聊天ID（用户ID或频道ID）
+        message: 消息内容（支持 MarkdownV2）
+    """
+    if not bot_token or not chat_id:
+        return False
+    
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    
+    # 转义 MarkdownV2 特殊字符
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    escaped_message = ''
+    for char in message:
+        if char in escape_chars:
+            escaped_message += '\\' + char
+        else:
+            escaped_message += char
+    
+    payload = {
+        'chat_id': chat_id,
+        'text': escaped_message,
+        'parse_mode': 'MarkdownV2',
+        'disable_web_page_preview': True
+    }
+    
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        result = response.json()
+        
+        if result.get('ok'):
+            print('  ✅ Telegram 通知发送成功')
+            return True
+        else:
+            print(f'  ❌ Telegram 发送失败: {result.get("description")}')
+            return False
+            
+    except Exception as e:
+        print(f'  ❌ Telegram 请求异常: {e}')
+        return False
+
+
+def format_telegram_message(results: list, execution_time: str, total_accounts: int) -> str:
+    """
+    格式化 Telegram 通知消息
+    """
+    success_count = sum(1 for r in results if r.get('success'))
+    fail_count = len(results) - success_count
+    
+    # 判断整体状态
+    if fail_count == 0:
+        status_emoji = "✅"
+        status_text = "全部成功"
+    elif success_count == 0:
+        status_emoji = "❌"
+        status_text = "全部失败"
+    else:
+        status_emoji = "⚠️"
+        status_text = "部分成功"
+    
+    lines = [
+        f"{status_emoji} *NewAPI 签到报告*",
+        "",
+        f"⏰ 执行时间: `{execution_time}`",
+        f"📊 总计: {total_accounts} 个账号 | 成功 {success_count} | 失败 {fail_count}",
+        ""
+    ]
+    
+    # 每个账号的详情
+    for i, result in enumerate(results, 1):
+        name = result.get('name', f'账号{i}')
+        success = result.get('success', False)
+        
+        if success:
+            emoji = "✅"
+            msg = result.get('message', '签到成功')
+            quota = result.get('quota_awarded')
+            
+            line = f"{emoji} *{name}*: {msg}"
+            
+            if quota:
+                # 格式化额度
+                if quota >= 1000000:
+                    quota_str = f"{quota / 1000000:.2f}M"
+                elif quota >= 1000:
+                    quota_str = f"{quota / 1000:.2f}K"
+                else:
+                    quota_str = str(quota)
+                line += f" \\(+{quota_str}\\)"
+                
+            checkin_count = result.get('checkin_count')
+            if checkin_count is not None:
+                line += f" 本月已签{checkin_count}天"
+                
+        else:
+            emoji = "❌"
+            msg = result.get('message', '签到失败')
+            # 截断过长的错误信息
+            if len(msg) > 50:
+                msg = msg[:47] + "..."
+            line = f"{emoji} *{name}*: `{msg}`"
+            
+        lines.append(line)
+    
+    lines.append("")
+    lines.append(f"#{status_text.replace(' ', '_')}")
+    
+    return '\n'.join(lines)
+
+
+# 尝试导入钉钉通知（保持兼容）
 try:
-    from dingtalk_notifier import send_checkin_notification
+    from dingtalk_notifier import send_checkin_notification as send_dingtalk_notification
 except ImportError:
-    send_checkin_notification = None
+    send_dingtalk_notification = None
 
 
 class NewAPICheckin:
@@ -381,6 +498,15 @@ def main():
         # 执行签到
         result = client.checkin()
 
+        # 收集结果用于通知
+        account_result = {
+            'name': name,
+            'success': False,
+            'message': result['message'],
+            'quota_awarded': None,
+            'checkin_count': None
+        }
+
         if result['success']:
             success_count += 1
             print(f'  结果: ✅ {result["message"]}')
@@ -403,6 +529,7 @@ def main():
 
             # 获取本月签到统计
             history = client.get_checkin_history()
+            checkin_count = 0
             if history and history.get('stats'):
                 stats = history['stats']
                 checkin_count = stats.get('checkin_count', 0)
@@ -415,28 +542,18 @@ def main():
                     total_str = str(total_quota)
                 print(f'  统计: 本月已签 {checkin_count} 天，累计 {total_str} 额度')
 
-            # 收集结果用于钉钉通知
-            account_result = {
-                'name': name,
-                'success': True,
-                'message': result['message'],
-                'quota_awarded': result.get('quota_awarded'),
-                'checkin_count': checkin_count
-            }
-            checkin_results.append(account_result)
+            # 更新结果
+            account_result['success'] = True
+            account_result['message'] = result['message']
+            account_result['quota_awarded'] = result.get('quota_awarded')
+            account_result['checkin_count'] = checkin_count
+
         else:
             fail_count += 1
             print(f'  结果: ❌ {result["message"]}')
+            account_result['message'] = result['message']
 
-        # 收集结果用于钉钉通知
-        account_result = {
-            'name': name,
-            'success': False,
-            'message': result['message'],
-            'session_expired': 'session' in result['message'].lower() or '认证' in result['message']
-        }
         checkin_results.append(account_result)
-
         print()
 
     # 汇总
@@ -444,12 +561,25 @@ def main():
     print(f'签到完成: 成功 {success_count}, 失败 {fail_count}')
     print('=' * 50)
     
-    # 发送钉钉通知
-    if send_checkin_notification:
-        print('正在发送钉钉通知...')
-        send_checkin_notification(checkin_results, execution_time)
+    # ============ 发送通知 ============
+    
+    # 1. Telegram 通知
+    tg_bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    tg_chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+    
+    if tg_bot_token and tg_chat_id:
+        print('\n[通知] 发送 Telegram 通知...')
+        tg_message = format_telegram_message(checkin_results, execution_time, len(accounts))
+        send_telegram_notification(tg_bot_token, tg_chat_id, tg_message)
+    elif os.environ.get('TELEGRAM_BOT_TOKEN') or os.environ.get('TELEGRAM_CHAT_ID'):
+        print('\n[警告] Telegram 配置不完整，需要同时设置 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID')
+    
+    # 2. 钉钉通知（保持兼容）
+    if send_dingtalk_notification:
+        print('\n[通知] 发送钉钉通知...')
+        send_dingtalk_notification(checkin_results, execution_time)
     elif os.environ.get('DINGTALK_WEBHOOK'):
-        print('[警告] 已配置 DINGTALK_WEBHOOK 但无法导入通知模块')
+        print('\n[警告] 已配置 DINGTALK_WEBHOOK 但无法导入通知模块')
 
     # 如果全部失败则返回错误码
     if fail_count == len(accounts):
@@ -458,6 +588,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-# === DINGTALK NOTIFICATION PATCH ===
-# This section was added to send DingTalk notifications
